@@ -1,6 +1,6 @@
 # 分类任务
 
-1. 运行case1.py即可，采用的随机森林算法，用的不同电压区间的最值以及标准差作为特征向量，详见函数**extract_features_from_file**。
+1. 运行case1.py即可，采用的SVM（随机森林算法也可以，直接切换即可），用的不同电压区间的最值以及标准差作为特征向量，详见函数**extract_features_from_file**。
 
 1. 查看结果直接看**classified_results.txt**。
 
