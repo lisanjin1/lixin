@@ -3,6 +3,7 @@ import os
 
 import numpy as np
 import pandas as pd
+from scipy.fft import rfft, rfftfreq
 from scipy.signal import find_peaks
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix
@@ -12,90 +13,97 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
 
-def extract_features_from_file(filepath, ranges=[(-0.2, 0.2), (0.6, 1)]):
+def basic_features(curve):
+    return [
+        np.mean(curve),  # 均值
+        np.std(curve),  # 标准差
+        np.min(curve), np.max(curve),  # 极值
+        np.median(curve),  # 中位数
+        np.percentile(curve, 25), np.percentile(curve, 75),  # 分位数
+        np.mean(np.diff(curve)),  # 一阶差分均值
+        np.std(np.diff(curve)),  # 一阶差分标准差
+    ]
 
+
+def signal_features(curve):
+    curve = curve - np.mean(curve)
+    fft_vals = np.abs(rfft(curve))
+    freqs = rfftfreq(len(curve))
+
+    peaks, _ = find_peaks(curve)
+    num_peaks = len(peaks)
+    mean_peak_height = np.mean(curve[peaks]) if num_peaks > 0 else 0
+
+    return [
+        np.sum(fft_vals[1:5]),  # 低频能量
+        np.sum(fft_vals[5:20]),  # 高频能量
+        np.argmax(fft_vals[1:]),  # 主频索引
+        num_peaks,  # 峰数
+        mean_peak_height,  # 峰高平均值
+    ]
+
+
+def geometric_features(curve):
+    x = np.arange(len(curve))
+    diff = np.max(curve) - np.min(curve)
+    deriv = np.gradient(curve)
+    curvature = np.mean(np.abs(np.gradient(deriv)))
+    area = np.trapz(curve, x)
+    roughness = np.mean(np.abs(np.diff(curve)))
+
+    # return [area, curvature, roughness]
+    return [np.max(curve)]
+
+
+def extract_features(curve):
+    f1 = basic_features(curve)
+    f2 = signal_features(curve)
+    f3 = geometric_features(curve)
+    return np.hstack([f1, f2, f3])
+
+
+def extract_features_from_file(filepath, ranges=[(-0.2, 0.2), (0.6, 1)]):
     # ranges = [(-np.inf, np.inf)]
 
-    """从一个xlsx文件提取特征向量（区间内所有曲线矩阵的均值和标准差）"""
+    """从一个xlsx文件提取特征向量"""
     df = pd.read_excel(filepath)
 
     # 去掉表头中的空格等
     df.columns = [str(c).strip() for c in df.columns]
 
     # 横坐标 (Voltage)
-    voltage = df.iloc[:, 0].values.ravel()   # 保证一维
-    currents = df.iloc[:, 1:].values        # 其他列为电流矩阵 (n点 × m曲线)
+    voltage = df.iloc[:, 0].values.ravel()  # 保证一维
+    currents = df.iloc[:, 1:].values  # 其他列为电流矩阵 (n点 × m曲线)
 
     # print(currents.shape)
 
     features = []
 
-    cnt = 0
-    for vmin, vmax in ranges:
-        cnt += 1
-        mask = (voltage >= vmin) & (voltage <= vmax)
-        v_sub = voltage[mask]
-        c_sub = currents[mask, :]   # 取所有曲线在这个电压区间的点
+    for i in range(currents.shape[1]):
+        current = currents[:, i]
+        cnt = 0
+        feat = []
+        for vmin, vmax in ranges:
+            cnt += 1
+            mask = (voltage >= vmin) & (voltage <= vmax)
+            v_sub = voltage[mask]
+            c_sub = current[mask]  # 取所有曲线在这个电压区间的点
 
-        all_peaks = []
-        for i in range(c_sub.shape[1]):
-            curve = c_sub[:, i]
+            # 把这些都作为特征
+            if cnt == 1:
+                feat_1 = np.max(c_sub)
+                feat.append(feat_1)
+                # print(feat)
+            elif cnt == 2:
+                feat_2 = np.std(np.diff(c_sub))
+                feat.append(feat_2)
+            elif cnt == 3:
+                feat_3 = np.std(np.diff(c_sub))
+                feat.append(feat_3)
+        # 子区间循环结束
+        features.append(feat)
 
-            # 找局部极大值索引
-            peak_idx, _ = find_peaks(curve, width=3)
-
-            if len(peak_idx) > 0:
-                # print(peak_idx)
-                peak_vals = curve[peak_idx]
-                all_peaks.extend(peak_vals)
-
-        if len(all_peaks) == 0:
-            all_peaks = [0]  # 区间内没有极大值
-
-        all_peaks = np.array(all_peaks) * 100000
-        peak_max = np.max(all_peaks)
-        peak_min = np.min(all_peaks)
-        peak_mean = np.mean(all_peaks)
-
-        # print(c_sub.shape)
-
-        # --- 电流幅值特征 ---
-        mean_range = np.mean(np.max(c_sub, axis=0) - np.min(c_sub, axis=0)) * 10000
-
-        # 把这些都作为特征
-        if cnt == 1:
-            # --- 梯度矩阵 ---
-            grads = np.gradient(c_sub, v_sub, axis=0)  # dI/dV
-
-            grads = grads[grads > 0]
-
-            # print(grads)
-
-            # 方法1：和电流一样，用 (max - min) 的平均值表示
-            grad_range = np.mean(np.max(grads, axis=0) - np.min(grads, axis=0)) * 10000
-
-            # 方法2：也可以补充整体均值 / 标准差
-            grad_mean = np.mean(grads)
-            grad_std = np.std(grads)
-            
-            diff = np.sum(np.max(c_sub, axis=0) - np.min(c_sub, axis=0)) * 10000
-            grad = np.gradient(np.sort(all_peaks))
-            grad_max = np.max(grad)
-
-            features.extend([grad_max])
-        else:
-            features.extend([peak_mean])
-
-        # if c_sub.size == 0:
-        #     # 如果该区间没有点，则补 0 或 NaN（推荐 NaN，后续再处理）
-        #     features.extend([np.nan, np.nan])
-        # else:
-        #     # 对矩阵求均值和标准差（所有点 × 所有曲线）
-        #     f_mean = np.mean(c_sub)
-        #     f_std = np.std(c_sub)
-        #     features.extend([f_std])
-
-    print(f"{filepath} : {np.round(features, 2)}")
+    # print(f"{filepath} : {np.round(features, 2)}")
 
     return np.array(features)
 
@@ -108,9 +116,10 @@ def load_dataset(base_dir, ranges):
     for label in class_labels:
         folder = os.path.join(base_dir, label)
         for filepath in glob.glob(os.path.join(folder, "*.xlsx")):
-            feat = extract_features_from_file(filepath, ranges)
-            X.append(feat)
-            y.append(label)
+            feats = extract_features_from_file(filepath, ranges)
+            for feat in feats:
+                X.append(feat)
+                y.append(label)
 
     return np.array(X), np.array(y)
 
@@ -141,7 +150,7 @@ def train_and_evaluate(X, y, method="svm", seed=1):
     return report, c_matrix
 
 
-def preprocess_outliers(X, y, method="iqr", threshold=0.2):
+def preprocess_outliers(X, y, method="iqr", threshold=0.5):
     """
     对于每个标签分组的数据，逐列检测离群值并替换为正常值均值。
 
@@ -158,7 +167,7 @@ def preprocess_outliers(X, y, method="iqr", threshold=0.2):
     y = np.asarray(y)
     X_new = X.copy()
 
-    for label in np.unique(y):   # 多个标签都会单独处理
+    for label in np.unique(y):  # 多个标签都会单独处理
         mask = (y == label)
         X_group = X[mask]  # 当前标签对应的子矩阵
 
@@ -192,18 +201,59 @@ def preprocess_outliers(X, y, method="iqr", threshold=0.2):
 
 if __name__ == "__main__":
     base_dir = "data"  # 三个子文件夹所在目录
-    method = "svm"
+    method = "rf"
     save_file = "classified_results.txt"
     # 指定提取特征的电压区间
     ranges = [(-0.5, 0), (0.75, 0.85)]
+    ranges = [(1.2, 1.5), (-0.5, 0.5), (0.75, 0.85)]
+    # ranges = [(-np.inf, np.inf)]
+
     X, y = load_dataset(base_dir, ranges)
-    # A = np.hstack([X, np.transpose([y])])
+    # print(X, y)
+    A = np.hstack([X, np.transpose([y])])
+
+    # 指定每一列的倍数（长度 = 特征列数）
+    scales = np.array([1e4, 1e6, 1e6])  # 每列乘以不同的系数
+
+    n_features = A.shape[1] - 1  # 特征列数
+    valid_scales = scales[:n_features]  # 自动截取匹配长度
+
+    # 对特征部分按列缩放
+    A_scaled = A.copy().astype(object)  # 保留不同类型列的兼容性
+    A_scaled[:, :-1] = np.round(A[:, :-1].astype(float) * valid_scales, 1)
+
+    A = A_scaled
+
+    for label in np.unique(A[:, -1]):
+        subset = A[A[:, -1] == label]  # 取出该标签对应的行
+        print(f"\nLabel {label}:")
+        print(subset[:10])  # 打印前10个（若不足10个就打印全部）
     # print(A)
+
+    report, c_matrix = train_and_evaluate(X, y, method=method)
+
+    # # 处理离群值！
     X = preprocess_outliers(X, y)
     A = np.hstack([X, np.transpose([y])])
-    print(A)
+    # 指定每一列的倍数（长度 = 特征列数）
+    scales = np.array([1e4, 1e6, 1e8])  # 每列乘以不同的系数
+
+    n_features = A.shape[1] - 1  # 特征列数
+    valid_scales = scales[:n_features]  # 自动截取匹配长度
+
+    # 对特征部分按列缩放
+    A_scaled = A.copy().astype(object)  # 保留不同类型列的兼容性
+    A_scaled[:, :-1] = np.round(A[:, :-1].astype(float) * valid_scales, 1)
+    A = A_scaled
+    for label in np.unique(A[:, -1]):
+        subset = A[A[:, -1] == label]  # 取出该标签对应的行
+        print(f"\nLabel {label}:")
+        print(subset[:10])  # 打印前10个（若不足10个就打印全部）
+    # print(A)
+
     report, c_matrix = train_and_evaluate(X, y, method=method)
-    # 保存分类结果
+    # # 保存分类结果
     with open(save_file, "w", encoding="utf-8") as f:
         f.write(f"分类报告：\n{report}")
         f.write(f"混淆矩阵：\n{c_matrix}")
+        print(f"file {save_file} saved.")

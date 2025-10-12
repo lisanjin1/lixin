@@ -35,5 +35,6 @@ function plotXlsxCurves(filename)
     % 设置坐标标签
     xlabel(tbl.Properties.VariableNames{1}, 'Interpreter','none');
     ylabel('Values');
+    ylim([0 6e-3]);
     title(['Curves from ', filename], 'Interpreter','none');
 end
