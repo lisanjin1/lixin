@@ -127,7 +127,11 @@ def load_dataset(base_dir, ranges):
 def train_and_evaluate(X, y, method="svm", seed=1):
     if method == "svm":
         """训练分类器并评估"""
-        clf = SVC(kernel='rbf', probability=True)  # 也可换成 RandomForestClassifier
+        # ✅ SVM 必须配合标准化
+        clf = make_pipeline(
+            StandardScaler(),
+            SVC(kernel='rbf', probability=True, C=1, gamma='scale', random_state=seed)
+        )
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
     elif method == "rf":
         clf = make_pipeline(
@@ -201,7 +205,7 @@ def preprocess_outliers(X, y, method="iqr", threshold=0.5):
 
 if __name__ == "__main__":
     base_dir = "data"  # 三个子文件夹所在目录
-    method = "rf"
+    method = "svm"
     save_file = "classified_results.txt"
     # 指定提取特征的电压区间
     ranges = [(-0.5, 0), (0.75, 0.85)]
