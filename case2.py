@@ -1,7 +1,7 @@
 import glob
+import itertools
 import os
 import re
-import itertools
 from functools import reduce
 from typing import List, Tuple, Dict, Any
 
@@ -14,7 +14,12 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.model_selection import KFold, cross_val_predict
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import cross_val_predict
+from sklearn.inspection import PartialDependenceDisplay
+import shap
+from sklearn.inspection import permutation_importance
 
+# 导入自定义模块
 from log import log
 
 
@@ -487,6 +492,96 @@ def full_experiment_pipeline(
     )
     log.info("✅ 模型训练完成，交叉验证平均 RMSE =", metrics_cv["aggregate"]["rmse_mean"])
 
+    # ================================================================
+    # 🎯 残差诊断图
+    # ================================================================
+
+    y_pred_flat = y_pred_cv.ravel()
+    y_true_flat = y.ravel()
+    residuals = y_true_flat - y_pred_flat
+
+    plt.figure(figsize=(6, 5))
+    plt.scatter(y_pred_flat, residuals, alpha=0.3)
+    plt.axhline(0, color='r', linestyle='--')
+    plt.xlabel("Predicted")
+    plt.ylabel("Residual")
+    plt.title("Residuals vs Predicted")
+    plt.grid(True)
+    plt.tight_layout()
+
+    res_plot_path = os.path.join(save_root, "residuals_vs_predicted.png")
+    plt.savefig(res_plot_path, dpi=300)
+    plt.close()
+
+    # 保存残差数据（可供外部绘图）
+    pd.DataFrame({
+        "y_true": y_true_flat,
+        "y_pred": y_pred_flat,
+        "residual": residuals
+    }).to_csv(os.path.join(save_root, "residuals_data.csv"), index=False)
+
+    # ================================================================
+    # 🌲 特征重要性 (Permutation Importance)
+    # ================================================================
+
+    X_imputed = Pipeline([
+        ('imputer', SimpleImputer(strategy='mean')),
+        ('scaler', StandardScaler())
+    ]).fit_transform(X)
+
+    result_perm = permutation_importance(
+        model, X_imputed, y, n_repeats=10, random_state=random_state, n_jobs=-1
+    )
+
+    importances_mean = result_perm.importances_mean
+    importances_std = result_perm.importances_std
+
+    # 绘图
+    feature_names = [f"F{i}" for i in range(X.shape[1])]
+    plt.figure(figsize=(8, 5))
+    sorted_idx = np.argsort(importances_mean)[::-1]
+    plt.bar(range(len(importances_mean)), importances_mean[sorted_idx], yerr=importances_std[sorted_idx], capsize=3)
+    plt.xticks(range(len(importances_mean)), np.array(feature_names)[sorted_idx], rotation=45)
+    plt.ylabel("Importance")
+    plt.title("Permutation Feature Importance (mean ± std)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_root, "feature_importance.png"), dpi=300)
+    plt.close()
+
+    # 保存数据
+    pd.DataFrame({
+        "feature": feature_names,
+        "importance_mean": importances_mean,
+        "importance_std": importances_std
+    }).to_csv(os.path.join(save_root, "feature_importance.csv"), index=False)
+
+    # ================================================================
+    # 📊 关键变量解释 (PDP + SHAP)
+    # ================================================================
+
+    # 仅选前3个重要特征绘制 PDP
+    top3_features = [feature_names[i] for i in sorted_idx[:3]]
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    PartialDependenceDisplay.from_estimator(model, X_imputed, features=sorted_idx[:3], feature_names=feature_names, ax=ax, target=0)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_root, "pdp_top3.png"), dpi=300)
+    plt.close()
+
+    # --- SHAP分析 ---
+    explainer = shap.Explainer(model.named_steps['reg'])
+    shap_values = explainer(X_imputed[:500])  # 取部分样本防止过慢
+
+    shap.summary_plot(shap_values, X_imputed[:500], feature_names=feature_names, show=False)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_root, "shap_summary.png"), dpi=300)
+    plt.close()
+
+    # 保存 shap 值数据（可外部绘制）
+    for out_idx in range(shap_values.values.shape[2]):
+        shap_df = pd.DataFrame(shap_values.values[:, :, out_idx], columns=feature_names)
+        shap_df.to_csv(os.path.join(save_root, f"shap_values_output{out_idx}.csv"), index=False)
+
     log.info("🔮 预测所有 DataFrame ...")
     predicted_dfs = predict_and_attach(model, dfs, meta)
 
@@ -537,7 +632,7 @@ if __name__ == "__main__":
     cnt = 0
     for folder_name in all_folders:
         cnt += 1
-        if cnt <= skip_count:
+        if cnt <= skip_count or folder_name == "None":
             log.warning(f"folder {folder_name} skipped!")
             continue
         current_folder = os.path.join(base_dir, folder_name)
@@ -547,7 +642,7 @@ if __name__ == "__main__":
         model, metrics_list, save_dir = full_experiment_pipeline(
             dfs,
             train_ratio=0.8,
-            include_voltage=True,
+            include_voltage=False,
             include_baseline=True,
             cv_folds=5,
             n_estimators=300,

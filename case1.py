@@ -10,6 +10,8 @@ from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # 必须导入以启用3D
 from sklearn.svm import SVC
 
 
@@ -261,3 +263,39 @@ if __name__ == "__main__":
         f.write(f"分类报告：\n{report}")
         f.write(f"混淆矩阵：\n{c_matrix}")
         print(f"file {save_file} saved.")
+
+        # A.shape = (N, 4)，前3列是坐标，最后1列是标签
+        # 示例：
+        # A = np.random.rand(100, 4)
+        # A[:, -1] = np.random.randint(0, 3, size=100)
+
+        # 1️⃣ 创建3D绘图
+        fig = plt.figure(figsize=(8, 6))
+        ax = fig.add_subplot(111, projection='3d')
+
+        # 颜色列表（可根据类别数量调整）
+        colors = plt.cm.tab10(np.linspace(0, 1, len(np.unique(A[:, -1]))))
+
+        # 2️⃣ 遍历标签分组
+        for i, label in enumerate(np.unique(A[:, -1])):
+            subset = A[A[:, -1] == label]
+            x, y, z = subset[:, 0], subset[:, 1], subset[:, 2]
+            ax.scatter(x, y, z, color=colors[i], label=f'Label {label}', s=30, alpha=0.8)
+
+        # 3️⃣ 美化图形
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        ax.legend(title="Classes")
+        ax.set_title("3D Scatter Plot by Label")
+        plt.tight_layout()
+
+        # 4️⃣ 保存图像
+        plt.savefig("3d_scatter_by_label.png", dpi=300)
+        plt.show()
+
+        # 5️⃣ 保存数据为 CSV（方便外部绘图）
+        df = pd.DataFrame(A, columns=['x', 'y', 'z', 'label'])
+        df.to_csv("3d_points_with_label.csv", index=False)
+        print("✅ 图像已保存为 3d_scatter_by_label.png")
+        print("✅ 数据已保存为 3d_points_with_label.csv")
