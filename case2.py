@@ -1,13 +1,16 @@
 import glob
 import itertools
 import os
+import pickle
 import re
 from functools import reduce
 from typing import List, Tuple, Dict, Any
 
+import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
@@ -466,7 +469,8 @@ def full_experiment_pipeline(
     cv_folds: int = 5,
     random_state: int = 42,
     n_estimators: int = 200,
-    save_root: str = "experiment_results"
+    save_root: str = "experiment_results",
+    retrain: bool = True
 ):
     """
     全流程封装：
@@ -486,11 +490,33 @@ def full_experiment_pipeline(
         include_baseline=include_baseline
     )
 
-    log.info("⚙️ 训练模型 + 交叉验证...")
-    model, metrics_cv, y_pred_cv = train_and_evaluate_multioutput(
-        X, y, cv_folds=cv_folds, random_state=random_state, n_estimators=n_estimators
-    )
-    log.info("✅ 模型训练完成，交叉验证平均 RMSE =", metrics_cv["aggregate"]["rmse_mean"])
+    model_path = os.path.join(save_root, "trained_model.joblib")
+    metrics_path = os.path.join(save_root, "cv_metrics.pkl")
+    y_pred_path = os.path.join(save_root, "y_pred_cv.npy")
+
+    if (not retrain) and all(os.path.exists(p) for p in [model_path, metrics_path, y_pred_path]):
+        # ✅ 从文件中直接加载
+        log.info("🟢 检测到已有模型缓存，跳过重新训练。")
+        model = joblib.load(model_path)
+        with open(metrics_path, "rb") as f:
+            metrics_cv = pickle.load(f)
+        y_pred_cv = np.load(y_pred_path)
+        log.info("✅ 成功加载缓存模型与结果。")
+
+    else:
+        # 🚀 重新训练模型
+        log.info("⚙️ 训练模型 + 交叉验证...")
+        model, metrics_cv, y_pred_cv = train_and_evaluate_multioutput(
+            X, y, cv_folds=cv_folds, random_state=random_state, n_estimators=n_estimators
+        )
+        log.info("✅ 模型训练完成，交叉验证平均 RMSE = %.6f", metrics_cv["aggregate"]["rmse_mean"])
+
+        # 💾 保存模型与结果
+        joblib.dump(model, model_path)
+        with open(metrics_path, "wb") as f:
+            pickle.dump(metrics_cv, f)
+        np.save(y_pred_path, y_pred_cv)
+        log.info("💾 模型与结果已保存到 %s", save_root)
 
     # ================================================================
     # 🎯 残差诊断图
@@ -499,6 +525,41 @@ def full_experiment_pipeline(
     y_pred_flat = y_pred_cv.ravel()
     y_true_flat = y.ravel()
     residuals = y_true_flat - y_pred_flat
+
+    # 示例数据
+    residual = y[:, 0] - y_pred_cv[:, 0]  # 第一个输出的残差
+    x1, x2, x3 = X[:, 0], X[:, 1], X[:, 2]
+
+    fig = go.Figure(data=[
+        go.Scatter3d(
+            x=x1, y=x2, z=residual,
+            mode='markers',
+            marker=dict(
+                size=5,
+                color=residual,  # 颜色映射残差值
+                colorscale='RdBu',
+                colorbar=dict(title='Residual'),
+                opacity=0.7
+            ),
+            text=[f"y_true={yt:.3f}<br>y_pred={yp:.3f}" for yt, yp in zip(y[:, 0], y_pred_cv[:, 0])],
+            hovertemplate="x1=%{x:.2f}<br>x2=%{y:.2f}<br>res=%{z:.3f}<br>%{text}"
+        )
+    ])
+
+    fig.update_layout(
+        title="3D Residual Cloud (Output 1)",
+        scene=dict(
+            xaxis_title="Feature 1",
+            yaxis_title="Feature 2",
+            zaxis_title="Residual"
+        ),
+        template="plotly_dark",
+        height=700
+    )
+
+    fig.show()
+
+    # fig.write_html(f"{save_root}/residual_cloud_output1.html", auto_open=True)
 
     plt.figure(figsize=(6, 5))
     plt.scatter(y_pred_flat, residuals, alpha=0.3)
@@ -520,73 +581,114 @@ def full_experiment_pipeline(
         "residual": residuals
     }).to_csv(os.path.join(save_root, "residuals_data.csv"), index=False)
 
-    # ================================================================
-    # 🌲 特征重要性 (Permutation Importance)
-    # ================================================================
-
-    X_imputed = Pipeline([
-        ('imputer', SimpleImputer(strategy='mean')),
-        ('scaler', StandardScaler())
-    ]).fit_transform(X)
-
-    result_perm = permutation_importance(
-        model, X_imputed, y, n_repeats=10, random_state=random_state, n_jobs=-1
-    )
-
-    importances_mean = result_perm.importances_mean
-    importances_std = result_perm.importances_std
-
-    # 绘图
-    feature_names = [f"F{i}" for i in range(X.shape[1])]
-    plt.figure(figsize=(8, 5))
-    sorted_idx = np.argsort(importances_mean)[::-1]
-    plt.bar(range(len(importances_mean)), importances_mean[sorted_idx], yerr=importances_std[sorted_idx], capsize=3)
-    plt.xticks(range(len(importances_mean)), np.array(feature_names)[sorted_idx], rotation=45)
-    plt.ylabel("Importance")
-    plt.title("Permutation Feature Importance (mean ± std)")
+    # ---- (2) 残差分布直方图 ----
+    plt.figure(figsize=(6, 4))
+    plt.hist(residuals, bins=40, color='skyblue', edgecolor='k', alpha=0.7, density=True)
+    plt.title("Residual Distribution")
+    plt.xlabel("Residual")
+    plt.ylabel("Density")
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(os.path.join(save_root, "feature_importance.png"), dpi=300)
+    plt.savefig(os.path.join(save_root, "residual_hist.png"), dpi=300)
     plt.close()
 
-    # 保存数据
-    pd.DataFrame({
-        "feature": feature_names,
-        "importance_mean": importances_mean,
-        "importance_std": importances_std
-    }).to_csv(os.path.join(save_root, "feature_importance.csv"), index=False)
-
-    # ================================================================
-    # 📊 关键变量解释 (PDP + SHAP)
-    # ================================================================
-
-    # 仅选前3个重要特征绘制 PDP
-    top3_features = [feature_names[i] for i in sorted_idx[:3]]
-
-    fig, ax = plt.subplots(figsize=(8, 6))
-    PartialDependenceDisplay.from_estimator(model, X_imputed, features=sorted_idx[:3], feature_names=feature_names, ax=ax, target=0)
+    # ---- (3) 残差 QQ图 ----
+    import scipy.stats as stats
+    plt.figure(figsize=(5, 5))
+    stats.probplot(residuals, dist="norm", plot=plt)
+    plt.title("QQ-Plot of Residuals")
     plt.tight_layout()
-    plt.savefig(os.path.join(save_root, "pdp_top3.png"), dpi=300)
+    plt.savefig(os.path.join(save_root, "residual_qqplot.png"), dpi=300)
     plt.close()
 
-    # --- SHAP分析 ---
-    explainer = shap.Explainer(model.named_steps['reg'])
-    shap_values = explainer(X_imputed[:500])  # 取部分样本防止过慢
 
-    shap.summary_plot(shap_values, X_imputed[:500], feature_names=feature_names, show=False)
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_root, "shap_summary.png"), dpi=300)
-    plt.close()
-
-    # 保存 shap 值数据（可外部绘制）
-    for out_idx in range(shap_values.values.shape[2]):
-        shap_df = pd.DataFrame(shap_values.values[:, :, out_idx], columns=feature_names)
-        shap_df.to_csv(os.path.join(save_root, f"shap_values_output{out_idx}.csv"), index=False)
+    # # ================================================================
+    # # 🌲 特征重要性 (Permutation Importance)
+    # # ================================================================
+    #
+    # X_imputed = Pipeline([
+    #     ('imputer', SimpleImputer(strategy='mean')),
+    #     ('scaler', StandardScaler())
+    # ]).fit_transform(X)
+    #
+    # result_perm = permutation_importance(
+    #     model, X_imputed, y, n_repeats=10, random_state=random_state, n_jobs=-1
+    # )
+    #
+    # importances_mean = result_perm.importances_mean
+    # importances_std = result_perm.importances_std
+    #
+    # # 绘图
+    # feature_names = [f"F{i}" for i in range(X.shape[1])]
+    # plt.figure(figsize=(8, 5))
+    # sorted_idx = np.argsort(importances_mean)[::-1]
+    # plt.bar(range(len(importances_mean)), importances_mean[sorted_idx], yerr=importances_std[sorted_idx], capsize=3)
+    # plt.xticks(range(len(importances_mean)), np.array(feature_names)[sorted_idx], rotation=45)
+    # plt.ylabel("Importance")
+    # plt.title("Permutation Feature Importance (mean ± std)")
+    # plt.tight_layout()
+    # plt.savefig(os.path.join(save_root, "feature_importance.png"), dpi=300)
+    # plt.close()
+    #
+    # # 保存数据
+    # pd.DataFrame({
+    #     "feature": feature_names,
+    #     "importance_mean": importances_mean,
+    #     "importance_std": importances_std
+    # }).to_csv(os.path.join(save_root, "feature_importance.csv"), index=False)
+    #
+    # # ================================================================
+    # # 📊 关键变量解释 (PDP + SHAP)
+    # # ================================================================
+    #
+    # # 仅选前3个重要特征绘制 PDP
+    # top3_features = [feature_names[i] for i in sorted_idx[:3]]
+    #
+    # fig, ax = plt.subplots(figsize=(8, 6))
+    # PartialDependenceDisplay.from_estimator(model, X_imputed, features=sorted_idx[:3], feature_names=feature_names, ax=ax, target=0)
+    # plt.tight_layout()
+    # plt.savefig(os.path.join(save_root, "pdp_top3.png"), dpi=300)
+    # plt.close()
+    #
+    # # --- SHAP分析 ---
+    # explainer = shap.Explainer(model.named_steps['reg'])
+    # shap_values = explainer(X_imputed[:500])  # 取部分样本防止过慢
+    #
+    # shap.summary_plot(shap_values, X_imputed[:500], feature_names=feature_names, show=False)
+    # plt.tight_layout()
+    # plt.savefig(os.path.join(save_root, "shap_summary.png"), dpi=300)
+    # plt.close()
+    #
+    # # 保存 shap 值数据（可外部绘制）
+    # for out_idx in range(shap_values.values.shape[2]):
+    #     shap_df = pd.DataFrame(shap_values.values[:, :, out_idx], columns=feature_names)
+    #     shap_df.to_csv(os.path.join(save_root, f"shap_values_output{out_idx}.csv"), index=False)
 
     log.info("🔮 预测所有 DataFrame ...")
     predicted_dfs = predict_and_attach(model, dfs, meta)
 
     log.info("📏 评估预测性能 ...")
     metrics_list = evaluate_predictions_on_dfs(predicted_dfs, dfs, meta)
+
+    # ================================================================
+    # 🔥 输出间相关性热力图
+    # ================================================================
+    y_true_df = pd.DataFrame(y, columns=[f"Ytrue_{j}" for j in range(y.shape[1])])
+    y_pred_df = pd.DataFrame(y_pred_cv, columns=[f"Ypred_{j}" for j in range(y.shape[1])])
+    corr_df = pd.concat([y_true_df, y_pred_df], axis=1).corr()
+
+    plt.figure(figsize=(10, 8))
+    plt.imshow(corr_df, cmap="coolwarm", interpolation="nearest")
+    plt.title("Correlation between True & Predicted Outputs")
+    plt.colorbar(label="Correlation coefficient")
+    plt.xticks(range(len(corr_df.columns)), corr_df.columns, rotation=90)
+    plt.yticks(range(len(corr_df.index)), corr_df.index)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_root, "output_correlation_heatmap.png"), dpi=300)
+    plt.close()
+
+    corr_df.to_csv(os.path.join(save_root, "output_correlation.csv"))
+
 
     rmse_total = 0
     mae_total = 0
@@ -625,6 +727,8 @@ if __name__ == "__main__":
     # 给定已经运行过的文件夹数量，需要全部运行则设置为0，否则将跳过前 skip_count 个文件夹的运行
     # skip_count = 0
     skip_count = 0
+    # 是否重新训练模型
+    retrain = False
 
     all_folders = os.listdir(base_dir)
 
@@ -646,7 +750,8 @@ if __name__ == "__main__":
             include_baseline=True,
             cv_folds=5,
             n_estimators=300,
-            save_root=f"predicted_results/{folder_name}"
+            save_root=f"predicted_results/{folder_name}",
+            retrain=retrain
         )
 
     # 结束计时
